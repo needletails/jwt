@@ -1,10 +1,39 @@
+import Foundation
+import HTTPTypes
 import JWT
 import JWTKit
 import Testing
+import Vapor
 import VaporTesting
 
 @Suite("JWTTests")
 struct JWTTests {
+    @Test("Shared keys identity")
+    func sharedKeysIdentity() async throws {
+        try await withApp { app in
+            await app.jwt.keys.add(
+                hmac: "a-string-secret-at-least-256-bits-long",
+                digestAlgorithm: .sha256
+            )
+
+            let payload = TestUser(name: "shared")
+            let token = try await app.jwt.keys.sign(payload)
+
+            app.get("me") { req async throws -> String in
+                try await req.jwt.verify(as: TestUser.self).name
+            }
+
+            try await app.testing { client in
+                let res = try await client.get(
+                    "me",
+                    headers: [.authorization: "Bearer \(token)"]
+                )
+                #expect(res.status == .ok)
+                #expect(try await res.body.requireString() == "shared")
+            }
+        }
+    }
+
     @Test("Test Docs")
     func docs() async throws {
         struct TestPayload: JWTPayload {
@@ -15,9 +44,7 @@ struct JWTTests {
             }
 
             var subject: SubjectClaim
-
             var expiration: ExpirationClaim
-
             var isAdmin: Bool
 
             func verify(using _: some JWTAlgorithm) async throws {
@@ -26,64 +53,67 @@ struct JWTTests {
         }
 
         try await withApp { app in
-            await app.jwt.keys.add(hmac: "a-string-secret-at-least-256-bits-long", digestAlgorithm: .sha256)
-
-            await app.jwt.keys.add(hmac: "another-string-secret-at-least-256-bits-long", digestAlgorithm: .sha256, kid: "a")
-            await app.jwt.keys.add(hmac: "a-third-string-secret-at-least-256-bits-long", digestAlgorithm: .sha256, kid: "b")
+            await app.jwt.keys.add(
+                hmac: "a-string-secret-at-least-256-bits-long",
+                digestAlgorithm: .sha256
+            )
+            await app.jwt.keys.add(
+                hmac: "another-string-secret-at-least-256-bits-long",
+                digestAlgorithm: .sha256,
+                kid: "a"
+            )
+            await app.jwt.keys.add(
+                hmac: "a-third-string-secret-at-least-256-bits-long",
+                digestAlgorithm: .sha256,
+                kid: "b"
+            )
 
             app.jwt.apple.applicationIdentifier = "..."
-            app.get("apple") { req async throws -> HTTPStatus in
+            app.get("apple") { req async throws -> HTTPResponse.Status in
                 _ = try await req.jwt.apple.verify()
                 return .ok
             }
 
             app.jwt.google.applicationIdentifier = "..."
             app.jwt.google.gSuiteDomainName = "..."
-            app.get("google") { req async throws -> HTTPStatus in
+            app.get("google") { req async throws -> HTTPResponse.Status in
                 _ = try await req.jwt.google.verify()
                 return .ok
             }
 
             app.jwt.microsoft.applicationIdentifier = "..."
-            app.get("microsoft") { req async throws -> HTTPStatus in
+            app.get("microsoft") { req async throws -> HTTPResponse.Status in
                 _ = try await req.jwt.microsoft.verify()
                 return .ok
             }
 
             app.jwt.firebaseAuth.applicationIdentifier = "..."
-            app.get("firebase") { req async throws -> HTTPStatus in
+            app.get("firebase") { req async throws -> HTTPResponse.Status in
                 _ = try await req.jwt.firebaseAuth.verify()
                 return .ok
             }
 
-            // Fetch and verify JWT from incoming request.
-            app.get("me") { req async throws -> HTTPStatus in
+            app.get("me") { req async throws -> HTTPResponse.Status in
                 try await req.jwt.verify(as: TestPayload.self)
                 return .ok
             }
 
-            // Generate and return a new JWT.
             app.post("login") { req async throws -> [String: String] in
-                // Create a new instance of our JWTPayload
                 let payload = TestPayload(
                     subject: "vapor",
                     expiration: .init(value: .distantFuture),
                     isAdmin: true
                 )
-                // Return the signed JWT
                 return try await [
                     "token": req.jwt.sign(payload, kid: "a")
                 ]
             }
 
-            // middleware-based authentication
-            // using req.auth.require
             let secure = app.grouped(TestUser.authenticator(), TestUser.guardMiddleware())
             secure.get("auth") { req -> TestUser in
                 if let user = req.auth.get(TestUser.self) {
                     return user
                 } else {
-                    // throw something other than unauthorized to prove the guard middleware let us get here (it shouldn't)
                     Issue.record("Shouldn't get here if the guard middleware is working.")
                     throw Abort(.internalServerError)
                 }
@@ -92,29 +122,28 @@ struct JWTTests {
             let token =
                 "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ2YXBvciIsImV4cCI6NjQwOTIyMTEyMDAsImFkbWluIjp0cnVlfQ.023MpwVrTea_vZ7uzgZGN1dB-XK88BSC0oyLnQDbxSI"
 
-            try await app.test(
-                .GET, "me", headers: ["Authorization": "Bearer \(token)"]
-            ) { res async in
-                #expect(res.status == .ok)
-            }
+            try await app.testing { client in
+                let me = try await client.get(
+                    "me",
+                    headers: [.authorization: "Bearer \(token)"]
+                )
+                #expect(me.status == .ok)
 
-            try await app.test(.POST, "login") { res async throws in
-                #expect(res.status == .ok)
-                _ = try #require(res.content.decode([String: String].self)["token"])
+                let login = try await client.post("login")
+                #expect(login.status == .ok)
+                let body = try await login.content.decode([String: String].self)
+                _ = try #require(body["token"])
             }
         }
     }
 
-    // Manual authentication using req.jwt.verify
     @Test("Test Manual Authentication")
     func manualAuthentication() async throws {
         try await withApp { app in
-            // configures an es512 signer using random key
             await app.jwt.keys.add(ecdsa: ES512PrivateKey())
 
-            // sign a token
             app.post("login") { req async throws -> LoginResponse in
-                let credentials = try req.content.decode(LoginCredentials.self)
+                let credentials = try await req.content.decode(LoginCredentials.self)
                 return try await LoginResponse(
                     token: req.jwt.sign(TestUser(name: credentials.name))
                 )
@@ -124,130 +153,87 @@ struct JWTTests {
                 try await req.jwt.verify(as: TestUser.self).name
             }
 
-            // stores the token created during login
-            var token: String?
+            try await app.testing { client in
+                let login = try await client.post("login", content: LoginCredentials(name: "foo"))
+                #expect(login.status == .ok)
+                let loginBody = try await login.content.decode(LoginResponse.self)
+                let token = loginBody.token
 
-            // test login
-            try await app.testing().test(
-                .POST, "login",
-                beforeRequest: { req in
-                    try req.content.encode(LoginCredentials(name: "foo"))
-                },
-                afterResponse: { res async throws in
-                    #expect(res.status == .ok)
-                    expectContent(LoginResponse.self, res) { login in
-                        token = login.token
-                    }
-                }
-            )
+                let me = try await client.get(
+                    "me",
+                    headers: [.authorization: "Bearer \(token)"]
+                )
+                #expect(me.status == .ok)
+                #expect(try await me.body.requireString() == "foo")
 
-            guard let t = token else {
-                Issue.record("login failed")
-                return
-            }
-
-            // test manual authentication using req.jwt.verify
-            try await app.testing().test(
-                .GET, "me", headers: ["authorization": "Bearer \(t)"]
-            ) { res async in
-                #expect(res.status == .ok)
-                #expect(res.body.string == "foo")
-            }
-
-            // create a token from a different signer
-            let fakeToken = try await JWTKeyCollection()
-                .add(ecdsa: ES512PrivateKey()).sign(TestUser(name: "bob"))
-            try await app.testing().test(
-                .GET, "me", headers: ["authorization": "Bearer \(fakeToken)"]
-            ) { res async in
-                #expect(res.status == .unauthorized)
+                let fakeToken = try await JWTKeyCollection()
+                    .add(ecdsa: ES512PrivateKey())
+                    .sign(TestUser(name: "bob"))
+                let fake = try await client.get(
+                    "me",
+                    headers: [.authorization: "Bearer \(fakeToken)"]
+                )
+                #expect(fake.status == .unauthorized)
             }
         }
     }
 
-    // Test middleware-based authentication using req.auth.require
     @Test("Test Middleware Authentication")
     func middlewareAuthentication() async throws {
         try await withApp { app in
-            // configures an es512 signer using random key
             await app.jwt.keys.add(ecdsa: ES512PrivateKey())
 
-            // jwt creation using req.jwt.sign
             app.post("login") { req async throws -> LoginResponse in
-                let credentials = try req.content.decode(LoginCredentials.self)
+                let credentials = try await req.content.decode(LoginCredentials.self)
                 return try await LoginResponse(
                     token: req.jwt.sign(TestUser(name: credentials.name))
                 )
             }
 
-            // middleware-based authentication
-            // using req.auth.require
             let secure = app.grouped(UserAuthenticator(), TestUser.guardMiddleware())
             secure.get("me") { req -> TestUser in
                 if let user = req.auth.get(TestUser.self) {
                     return user
                 } else {
-                    // throw something other than unauthorized to prove the guard middleware let us get here (it shouldn't)
                     Issue.record("Shouldn't get here if the guard middleware is working.")
                     throw Abort(.internalServerError)
                 }
             }
 
-            // stores the token created during login
-            var token: String?
+            try await app.testing { client in
+                let login = try await client.post("login", content: LoginCredentials(name: "foo"))
+                #expect(login.status == .ok)
+                let token = try await login.content.decode(LoginResponse.self).token
 
-            // test login
-            try await app.testing().test(
-                .POST, "login",
-                beforeRequest: { req in
-                    try req.content.encode(LoginCredentials(name: "foo"))
-                },
-                afterResponse: { res async in
-                    #expect(res.status == .ok)
-                    expectContent(LoginResponse.self, res) { login in
-                        token = login.token
-                    }
-                }
-            )
+                let me = try await client.get(
+                    "me",
+                    headers: [.authorization: "Bearer \(token)"]
+                )
+                #expect(me.status == .ok)
+                let user = try await me.content.decode(TestUser.self)
+                #expect(user.name == "foo")
 
-            guard let token else {
-                Issue.record("login failed")
-                return
-            }
+                let wrongNameToken = try await app.jwt.keys.sign(TestUser(name: "bob"))
+                let wrongName = try await client.get(
+                    "me",
+                    headers: [.authorization: "Bearer \(wrongNameToken)"]
+                )
+                #expect(wrongName.status == .unauthorized)
 
-            try await app.testing().test(
-                .GET, "me", headers: ["authorization": "Bearer \(token)"]
-            ) { res async in
-                #expect(res.status == .ok)
-                expectContent(TestUser.self, res) { user in
-                    #expect(user.name == "foo")
-                }
-            }
-
-            // token from same signer but for a different user
-            // this tests that the guard middleware catches the failure to auth before it reaches the route handler
-            let wrongNameToken = try await app.jwt.keys.sign(TestUser(name: "bob"))
-            try await app.testing().test(
-                .GET, "me", headers: ["authorization": "Bearer \(wrongNameToken)"]
-            ) { res async in
-                #expect(res.status == .unauthorized)
-            }
-
-            // create a token from a different signer
-            let fakeToken = try await JWTKeyCollection().add(ecdsa: ES512PrivateKey()).sign(TestUser(name: "bob"))
-            try await app.testing().test(
-                .GET, "me", headers: ["authorization": "Bearer \(fakeToken)"]
-            ) { res async in
-                #expect(res.status == .unauthorized)
+                let fakeToken = try await JWTKeyCollection()
+                    .add(ecdsa: ES512PrivateKey())
+                    .sign(TestUser(name: "bob"))
+                let fake = try await client.get(
+                    "me",
+                    headers: [.authorization: "Bearer \(fakeToken)"]
+                )
+                #expect(fake.status == .unauthorized)
             }
         }
     }
 
-    /// Tests the Apple Sign In verification flow using a mock JWKS endpoint.
-    /// This tests the full pipeline: JWKS fetching, token verification, and application identifier validation.
     @Test("Test Apple Authentication with Mock JWKS")
     func testAppleWithMockJWKS() async throws {
-        // JWKS JSON with RSA key taken from JWTKit Tests
         let mockJWKS = """
             {
                 "keys": [
@@ -298,7 +284,7 @@ struct JWTTests {
             app.get("mock-apple-jwks") { _ in
                 Response(
                     status: .ok,
-                    headers: ["Content-Type": "application/json"],
+                    headers: [.contentType: "application/json"],
                     body: .init(string: mockJWKS)
                 )
             }
@@ -313,6 +299,9 @@ struct JWTTests {
                 return token.subject.value
             }
 
+            // Touch JWT before the app starts so the request-context middleware is installed.
+            app.jwt.apple.applicationIdentifier = "com.example.app"
+
             let privateKey = try Insecure.RSA.PrivateKey(pem: rsaPrivateKeyPEM)
             let signingKeys = await JWTKeyCollection().add(
                 rsa: privateKey,
@@ -320,7 +309,6 @@ struct JWTTests {
                 kid: "test-apple-key"
             )
 
-            // Valid token with correct application identifier
             let validPayload = AppleIdentityToken(
                 issuer: "https://appleid.apple.com",
                 audience: "com.example.app",
@@ -332,20 +320,17 @@ struct JWTTests {
             )
             let validToken = try await signingKeys.sign(validPayload, kid: "test-apple-key")
 
-            try await app.server.start(address: .hostname("localhost", port: 0))
+            try await app.testing(.running) { client in
+                let port = try #require(client.port)
+                app.jwt.apple.jwksEndpoint = "http://127.0.0.1:\(port)/mock-apple-jwks"
 
-            do {
-                let port = try #require(app.http.server.shared.localAddress?.port, "Failed to get port")
-
-                app.jwt.apple.jwksEndpoint = "http://localhost:\(port)/mock-apple-jwks"
-                app.jwt.apple.applicationIdentifier = "com.example.app"
-
-                let verifyResponse = try await app.client.get(
-                    "http://localhost:\(port)/apple-verify", headers: ["Authorization": "Bearer \(validToken)"])
+                let verifyResponse = try await client.get(
+                    "apple-verify",
+                    headers: [.authorization: "Bearer \(validToken)"]
+                )
                 #expect(verifyResponse.status == .ok)
-                #expect(verifyResponse.body?.string == "001234.abcdef1234567890.1234")
+                #expect(try await verifyResponse.body.requireString() == "001234.abcdef1234567890.1234")
 
-                // Token with wrong application identifier should fail
                 let wrongAudiencePayload = AppleIdentityToken(
                     issuer: "https://appleid.apple.com",
                     audience: "com.wrong.app",
@@ -354,12 +339,12 @@ struct JWTTests {
                     subject: "001234.abcdef1234567890.1234"
                 )
                 let wrongAudienceToken = try await signingKeys.sign(wrongAudiencePayload, kid: "test-apple-key")
-
-                let wrongAudienceResponse = try await app.client.get(
-                    "http://localhost:\(port)/apple-verify", headers: ["Authorization": "Bearer \(wrongAudienceToken)"])
+                let wrongAudienceResponse = try await client.get(
+                    "apple-verify",
+                    headers: [.authorization: "Bearer \(wrongAudienceToken)"]
+                )
                 #expect(wrongAudienceResponse.status == .unauthorized)
 
-                // Expired token should fail
                 let expiredPayload = AppleIdentityToken(
                     issuer: "https://appleid.apple.com",
                     audience: "com.example.app",
@@ -368,12 +353,12 @@ struct JWTTests {
                     subject: "001234.abcdef1234567890.1234"
                 )
                 let expiredToken = try await signingKeys.sign(expiredPayload, kid: "test-apple-key")
-
-                let expiredTokenResponse = try await app.client.get(
-                    "http://localhost:\(port)/apple-verify", headers: ["Authorization": "Bearer \(expiredToken)"])
+                let expiredTokenResponse = try await client.get(
+                    "apple-verify",
+                    headers: [.authorization: "Bearer \(expiredToken)"]
+                )
                 #expect(expiredTokenResponse.status == .unauthorized)
 
-                // Token with wrong issuer should fail
                 let wrongIssuerPayload = AppleIdentityToken(
                     issuer: "https://notapple.com",
                     audience: "com.example.app",
@@ -382,16 +367,15 @@ struct JWTTests {
                     subject: "001234.abcdef1234567890.1234"
                 )
                 let wrongIssuerToken = try await signingKeys.sign(wrongIssuerPayload, kid: "test-apple-key")
-
-                let wrongIssuerResponse = try await app.client.get(
-                    "http://localhost:\(port)/apple-verify", headers: ["Authorization": "Bearer \(wrongIssuerToken)"])
+                let wrongIssuerResponse = try await client.get(
+                    "apple-verify",
+                    headers: [.authorization: "Bearer \(wrongIssuerToken)"]
+                )
                 #expect(wrongIssuerResponse.status == .unauthorized)
 
-                // Missing authorization header should fail
-                let missingAuthHeaderResponse = try await app.client.get("http://localhost:\(port)/apple-verify")
+                let missingAuthHeaderResponse = try await client.get("apple-verify")
                 #expect(missingAuthHeaderResponse.status == .unauthorized)
 
-                // Verify application identifier can be overridden per-request
                 let customAudiencePayload = AppleIdentityToken(
                     issuer: "https://appleid.apple.com",
                     audience: "com.custom.app",
@@ -400,16 +384,12 @@ struct JWTTests {
                     subject: "custom-user-id"
                 )
                 let customToken = try await signingKeys.sign(customAudiencePayload, kid: "test-apple-key")
-
-                let customKidResponse = try await app.client.get(
-                    "http://localhost:\(port)/apple-verify-custom", headers: ["Authorization": "Bearer \(customToken)"])
+                let customKidResponse = try await client.get(
+                    "apple-verify-custom",
+                    headers: [.authorization: "Bearer \(customToken)"]
+                )
                 #expect(customKidResponse.status == .ok)
-                #expect(customKidResponse.body?.string == "custom-user-id")
-
-                await app.server.shutdown()
-            } catch {
-                await app.server.shutdown()
-                throw error
+                #expect(try await customKidResponse.body.requireString() == "custom-user-id")
             }
         }
     }
@@ -417,7 +397,10 @@ struct JWTTests {
     @Test("Test Microsoft Endpoint Switch")
     func testMicrosoftEndpointSwitch() async throws {
         try await withApp { app in
-            await app.jwt.keys.add(hmac: "a-string-secret-at-least-256-bits-long", digestAlgorithm: .sha256)
+            await app.jwt.keys.add(
+                hmac: "a-string-secret-at-least-256-bits-long",
+                digestAlgorithm: .sha256
+            )
 
             let testUser = TestUser(name: "foo")
             let token = try await app.jwt.keys.sign(testUser)
@@ -428,19 +411,28 @@ struct JWTTests {
                 return token.name ?? "none"
             }
 
-            try await app.test(.GET, "microsoft", headers: ["Authorization": "Bearer \(token)"]) { res async in
-                #expect(res.status == .unauthorized)
-            }
+            try await app.testing { client in
+                let unauthorized = try await client.get(
+                    "microsoft",
+                    headers: [.authorization: "Bearer \(token)"]
+                )
+                #expect(unauthorized.status == .unauthorized)
 
-            app.jwt.microsoft.jwksEndpoint = "https://login.microsoftonline.com/common/discovery/v2.0/keys"
-            try await app.test(.GET, "microsoft", headers: ["Authorization": "Bearer \(token)"]) { res async in
-                #expect(res.status == .unauthorized)
-            }
+                app.jwt.microsoft.jwksEndpoint =
+                    "https://login.microsoftonline.com/common/discovery/v2.0/keys"
+                let stillUnauthorized = try await client.get(
+                    "microsoft",
+                    headers: [.authorization: "Bearer \(token)"]
+                )
+                #expect(stillUnauthorized.status == .unauthorized)
 
-            // Use a non-existent endpoint to show that endpoint switching works
-            app.jwt.microsoft.jwksEndpoint = "https://login.microsoftonline.com/nonexistent/endpoint"
-            try await app.test(.GET, "microsoft", headers: ["Authorization": "Bearer \(token)"]) { res async in
-                #expect(res.status == .internalServerError)
+                app.jwt.microsoft.jwksEndpoint =
+                    "https://login.microsoftonline.com/nonexistent/endpoint"
+                let serverError = try await client.get(
+                    "microsoft",
+                    headers: [.authorization: "Bearer \(token)"]
+                )
+                #expect(serverError.status == .internalServerError)
             }
         }
     }

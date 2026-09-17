@@ -1,7 +1,8 @@
+import JWTKit
 import Vapor
 
 extension JWTPayload where Self: Authenticatable {
-    public static func authenticator() -> AsyncAuthenticator {
+    public static func authenticator() -> some BearerAuthenticator {
         JWTPayloadAuthenticator<Self>()
     }
 }
@@ -13,7 +14,7 @@ where Payload: JWTPayload & Authenticatable {
     }
 }
 
-public protocol JWTAuthenticator: AsyncBearerAuthenticator {
+public protocol JWTAuthenticator: BearerAuthenticator {
     associatedtype Payload: JWTPayload
     func authenticate(jwt: Payload, for request: Request) async throws
 }

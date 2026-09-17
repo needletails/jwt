@@ -5,9 +5,9 @@ let package = Package(
     name: "jwt",
     platforms: [
         .macOS("26.2"),
-        .iOS("16"),
-        .tvOS("16"),
-        .watchOS("9"),
+        .iOS("26.2"),
+        .tvOS("26.2"),
+        .watchOS("26.2"),
     ],
     products: [
         .library(name: "JWT", targets: ["JWT"])

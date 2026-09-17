@@ -1,4 +1,10 @@
-import NIOConcurrencyHelpers
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
+import Foundation
+#endif
+import JWTKit
+import Logging
 import Vapor
 
 extension Request.JWT {
@@ -14,10 +20,14 @@ extension Request.JWT {
             gSuiteDomainName: String? = nil
         ) async throws -> GoogleIdentityToken {
             guard let token = self._jwt._request.headers.bearerAuthorization?.token else {
-                self._jwt._request.logger.error("Request is missing JWT bearer header.")
+                Logger.current.error("Request is missing JWT bearer header.")
                 throw Abort(.unauthorized)
             }
-            return try await self.verify(token, applicationIdentifier: applicationIdentifier, gSuiteDomainName: gSuiteDomainName)
+            return try await self.verify(
+                token,
+                applicationIdentifier: applicationIdentifier,
+                gSuiteDomainName: gSuiteDomainName
+            )
         }
 
         public func verify(
@@ -25,7 +35,11 @@ extension Request.JWT {
             applicationIdentifier: String? = nil,
             gSuiteDomainName: String? = nil
         ) async throws -> GoogleIdentityToken {
-            try await self.verify([UInt8](message.utf8), applicationIdentifier: applicationIdentifier, gSuiteDomainName: gSuiteDomainName)
+            try await self.verify(
+                [UInt8](message.utf8),
+                applicationIdentifier: applicationIdentifier,
+                gSuiteDomainName: gSuiteDomainName
+            )
         }
 
         public func verify(
@@ -60,130 +74,37 @@ extension Application.JWT {
         public let _jwt: Application.JWT
 
         public func keys(on request: Request) async throws -> JWTKeyCollection {
-            try await .init().add(jwks: jwks.get(on: request).get())
+            try await JWTKeyCollection().add(jwks: self.jwks.get())
         }
 
         public var jwks: EndpointCache<JWKS> {
-            self.storage.jwks
+            self._jwt.storage.google.jwks
         }
 
         public var jwksEndpoint: URI {
             get {
-                self.storage.jwksEndpoint
+                self._jwt.storage.google.jwksEndpoint
             }
             nonmutating set {
-                self.storage.jwksEndpoint = newValue
-                self.storage.jwks = .init(uri: newValue)
+                self._jwt.storage.google.setEndpoint(newValue, client: self._jwt._application.client)
             }
         }
 
         public var applicationIdentifier: String? {
             get {
-                self.storage.applicationIdentifier
+                self._jwt.storage.google.applicationIdentifier
             }
             nonmutating set {
-                self.storage.applicationIdentifier = newValue
+                self._jwt.storage.google.applicationIdentifier = newValue
             }
         }
 
         public var gSuiteDomainName: String? {
             get {
-                self.storage.gSuiteDomainName
+                self._jwt.storage.google.gSuiteDomainName
             }
             nonmutating set {
-                self.storage.gSuiteDomainName = newValue
-            }
-        }
-
-        private struct Key: StorageKey, LockKey {
-            typealias Value = Storage
-        }
-
-        private final class Storage: Sendable {
-            private struct SendableBox: Sendable {
-                var jwks: EndpointCache<JWKS>
-                var jwksEndpoint: URI
-                var applicationIdentifier: String? = nil
-                var gSuiteDomainName: String? = nil
-            }
-
-            private let sendableBox: NIOLockedValueBox<SendableBox>
-
-            var jwks: EndpointCache<JWKS> {
-                get {
-                    self.sendableBox.withLockedValue { box in
-                        box.jwks
-                    }
-                }
-                set {
-                    self.sendableBox.withLockedValue { box in
-                        box.jwks = newValue
-                    }
-                }
-            }
-
-            var applicationIdentifier: String? {
-                get {
-                    self.sendableBox.withLockedValue { box in
-                        box.applicationIdentifier
-                    }
-                }
-                set {
-                    self.sendableBox.withLockedValue { box in
-                        box.applicationIdentifier = newValue
-                    }
-                }
-            }
-
-            var gSuiteDomainName: String? {
-                get {
-                    self.sendableBox.withLockedValue { box in
-                        box.gSuiteDomainName
-                    }
-                }
-                set {
-                    self.sendableBox.withLockedValue { box in
-                        box.gSuiteDomainName = newValue
-                    }
-                }
-            }
-
-            var jwksEndpoint: URI {
-                get {
-                    self.sendableBox.withLockedValue { box in
-                        box.jwksEndpoint
-                    }
-                }
-                set {
-                    self.sendableBox.withLockedValue { box in
-                        box.jwksEndpoint = newValue
-                    }
-                }
-            }
-
-            init() {
-                let jwksEndpoint: URI = "https://www.googleapis.com/oauth2/v3/certs"
-                let box = SendableBox(
-                    jwks: .init(uri: jwksEndpoint),
-                    jwksEndpoint: jwksEndpoint
-                )
-                self.sendableBox = .init(box)
-            }
-        }
-
-        private var storage: Storage {
-            if let existing = self._jwt._application.storage[Key.self] {
-                return existing
-            } else {
-                let lock = self._jwt._application.locks.lock(for: Key.self)
-                lock.lock()
-                defer { lock.unlock() }
-                if let existing = self._jwt._application.storage[Key.self] {
-                    return existing
-                }
-                let new = Storage()
-                self._jwt._application.storage[Key.self] = new
-                return new
+                self._jwt.storage.google.gSuiteDomainName = newValue
             }
         }
     }

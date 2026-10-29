@@ -1,20 +1,20 @@
-// swift-tools-version:6.2
+// swift-tools-version:6.4
 import PackageDescription
 
 let package = Package(
     name: "jwt",
     platforms: [
-        .macOS(.v13),
-        .iOS(.v16),
-        .tvOS(.v16),
-        .watchOS(.v9),
+        .macOS("26.2"),
+        .iOS("26.2"),
+        .tvOS("26.2"),
+        .watchOS("26.2"),
     ],
     products: [
         .library(name: "JWT", targets: ["JWT"])
     ],
     dependencies: [
         .package(url: "https://github.com/vapor/jwt-kit.git", from: "5.8.0"),
-        .package(url: "https://github.com/vapor/vapor.git", from: "4.110.2"),
+        .package(url: "https://github.com/vapor/vapor.git", exact: "5.0.0-beta.4")
     ],
     targets: [
         .target(
